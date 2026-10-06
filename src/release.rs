@@ -129,6 +129,55 @@ pub fn release(p: &Project) -> anyhow::Result<String> {
     Ok(lines.join("\n"))
 }
 
+/// Reuse the tarball release `p.tag()` already ships, if it does: download it
+/// from the public URL, hash it, and write the same `dist/release.json`
+/// `release` writes. Needs neither a clean tree nor a local tarball — for a
+/// publisher who only wants to push the already-released build to the
+/// registry. Returns `None` when the release or the asset does not exist.
+pub fn adopt(p: &Project) -> anyhow::Result<Option<String>> {
+    let repo = github_repo(&run::capture(
+        &p.root,
+        "git",
+        &["remote", "get-url", "origin"],
+    )?)?;
+    let tag = p.tag();
+    let name = p.tarball_name();
+    let existing = run::capture(
+        &p.root,
+        "gh",
+        &[
+            "release",
+            "view",
+            &tag,
+            "-R",
+            &repo,
+            "--json",
+            "assets",
+            "-q",
+            ".assets[].name",
+        ],
+    );
+    match existing {
+        Ok(assets) if assets.lines().any(|a| a == name) => {}
+        // No release, or a release without our tarball.
+        _ => return Ok(None),
+    }
+
+    let url = format!("https://github.com/{repo}/releases/download/{tag}/{name}");
+    let sha = fetch_sha(&url)?;
+    let rec = Released {
+        version: p.version.clone(),
+        url: url.clone(),
+        sha256: sha.clone(),
+        repo,
+    };
+    std::fs::create_dir_all(p.dist())?;
+    std::fs::write(record_path(p), serde_json::to_string_pretty(&rec)? + "\n")?;
+    Ok(Some(format!(
+        "adopted {name} from existing release {tag}\n  verified {url}\n  sha256:{sha}"
+    )))
+}
+
 /// GitHub's CDN can serve a replaced asset's old bytes for a minute or two,
 /// so retry before calling it a mismatch.
 fn verify_served(url: &str, want: &str) -> anyhow::Result<()> {

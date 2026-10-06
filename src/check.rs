@@ -46,25 +46,28 @@ pub fn check(p: &Project) -> anyhow::Result<String> {
     let result = handshake(&stage, entry);
     let _ = std::fs::remove_dir_all(&stage);
     let manifest = result?;
-    verify_manifest(p, &manifest)?;
+    let note = verify_manifest(p, &manifest)?;
     let tools = manifest["tools"].as_array().map_or(0, Vec::len);
     let commands = manifest["commands"].as_array().map_or(0, Vec::len);
     Ok(format!(
-        "check ok: {} {} — entry {entry}, protocol {}, {tools} tool(s), {commands} command(s)",
+        "check ok: {} {} — entry {entry}, protocol {}, {tools} tool(s), {commands} command(s){}",
         p.key,
         p.version,
-        manifest["protocol"].as_str().unwrap_or("?")
+        manifest["protocol"].as_str().unwrap_or("?"),
+        note.map(|n| format!("\n  note: {n}")).unwrap_or_default(),
     ))
 }
 
-pub fn verify_manifest(p: &Project, m: &Value) -> anyhow::Result<()> {
-    if m["name"] != p.key.as_str() {
-        anyhow::bail!(
-            "manifest name is {} but the registry key is \"{}\" — make them match",
-            m["name"],
-            p.key
-        );
-    }
+/// Returns a note for the report when the manifest name differs from the
+/// registry key (fine — e.g. `claude-sub` publishes as `claude`); version and
+/// tool-shape mismatches still fail.
+pub fn verify_manifest(p: &Project, m: &Value) -> anyhow::Result<Option<String>> {
+    let note = (m["name"] != p.key.as_str()).then(|| {
+        format!(
+            "manifest name {} differs from registry key \"{}\"",
+            m["name"], p.key
+        )
+    });
     if m["version"] != p.version.as_str() {
         anyhow::bail!(
             "manifest version {} != Cargo.toml version {}",
@@ -77,7 +80,7 @@ pub fn verify_manifest(p: &Project, m: &Value) -> anyhow::Result<()> {
             anyhow::bail!("tool entry needs a name and parameters: {t}");
         }
     }
-    Ok(())
+    Ok(note)
 }
 
 fn handshake(dir: &Path, entry: &str) -> anyhow::Result<Value> {
@@ -142,13 +145,17 @@ mod tests {
     }
 
     #[test]
-    fn manifest_must_match_key_and_version() {
+    fn manifest_must_match_version_but_a_different_name_is_only_a_note() {
         let p = project();
-        assert!(
-            verify_manifest(&p, &json!({"name": "w", "version": "1.2.3", "tools": []})).is_ok()
+        assert_eq!(
+            verify_manifest(&p, &json!({"name": "w", "version": "1.2.3", "tools": []})).unwrap(),
+            None
         );
-        let e = verify_manifest(&p, &json!({"name": "gray-w", "version": "1.2.3"})).unwrap_err();
-        assert!(e.to_string().contains("registry key"));
+        let note = verify_manifest(&p, &json!({"name": "w-sub", "version": "1.2.3"})).unwrap();
+        assert_eq!(
+            note.as_deref(),
+            Some("manifest name \"w-sub\" differs from registry key \"w\"")
+        );
         assert!(verify_manifest(&p, &json!({"name": "w", "version": "1.0.0"})).is_err());
         assert!(
             verify_manifest(
